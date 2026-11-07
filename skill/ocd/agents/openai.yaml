@@ -1,0 +1,4 @@
+interface:
+  display_name: "OCD — Organized Chat Directory"
+  short_description: "Organize chats by topic across compatible apps"
+  default_prompt: "Use $ocd to organize my chats by topic, preserving my manual placements."

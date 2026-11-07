@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and journal sidebar moves for the Chat Organizer skill."""
+"""Build and journal sidebar moves for OCD."""
 
 import argparse
 import hashlib
@@ -30,6 +30,8 @@ def write(path, data):
 
 
 def key(item):
+    if "key" in item:
+        return item["key"]
     if "projectKind" in item:
         return "project:" + item["projectId"]
     return f"{item['kind']}:{item.get('hostId', 'local') if item['kind'] == 'codex' else ''}:{item['id']}"
@@ -66,6 +68,8 @@ def placements(snapshot):
 
 
 def sidebar_key(item):
+    if "sidebarKey" in item:
+        return item["sidebarKey"]
     if "projectKind" in item:
         return (
             f"codex:project:{item['projectId']}"
@@ -109,7 +113,7 @@ def plan(snapshot, assignment, state=None):
         previous = state.get("managed", {}).get(k)
         # Keep pins and user moves; never pull children out of their existing project.
         reason = None
-        if current == "pinned":
+        if current == "pinned" or item.get("pinned"):
             reason = "Pinned"
         elif a.get("locked") or k in state.get("locks", []):
             reason = "Locked"
@@ -132,18 +136,28 @@ def plan(snapshot, assignment, state=None):
             "reason": a["reason"],
             "confidence": a["confidence"],
         }
-        if "projectKind" in item:
+        if "move" in item:
+            move = item["move"]
+            op["beforeDestination"] = None if current == "chats" else current
+            op.update(
+                tool=move.get("tool"),
+                args=dict(move.get("args", {})),
+                sectionArgument=move.get("sectionArgument", "sectionId"),
+            )
+        elif "projectKind" in item:
             op.update(
                 tool="move_project_to_sidebar_section",
                 args={"projectId": item["projectId"]},
             )
-        else:
+        elif item["kind"] in ("codex", "chatgpt"):
             op.update(
                 tool="move_thread_to_sidebar_section",
                 args={"threadId": item["id"], "source": item["kind"]},
             )
             if item["kind"] == "codex":
                 op["args"]["hostId"] = item.get("hostId", "local")
+        if "tool" not in op:
+            raise ValueError("Unknown provider: supply an explicit move mapping")
         operations.append(op)
     return {
         "version": 1,
@@ -168,10 +182,18 @@ def resolve(proposal, section_ids, snapshot):
         actual = current.get(sidebar_key(items[op["key"]]))
         if actual == dest:
             continue
+        if not op.get("tool"):
+            raise ValueError(
+                "No move capability; use the report command for a manual plan"
+            )
         if actual != op["beforeSectionId"]:
             raise ValueError("Placement changed since preview: " + op["key"])
         operations.append(
-            {**op, "afterSectionId": dest, "args": {**op["args"], "sectionId": dest}}
+            {
+                **op,
+                "afterSectionId": dest,
+                "args": {**op["args"], op.get("sectionArgument", "sectionId"): dest},
+            }
         )
     return {
         **proposal,
@@ -212,7 +234,12 @@ def undo(journal, current):
             {
                 "key": op["key"],
                 "tool": op["tool"],
-                "args": {**op["args"], "sectionId": op["beforeSectionId"]},
+                "args": {
+                    **op["args"],
+                    op.get("sectionArgument", "sectionId"): op.get(
+                        "beforeDestination", op["beforeSectionId"]
+                    ),
+                },
             }
         )
     return {
@@ -220,6 +247,93 @@ def undo(journal, current):
         "skipped": skipped,
         "note": "Only remove organizer-created sections after verifying they are empty. Restore section order from the before snapshot.",
     }
+
+
+def normalize_export(export):
+    """Translate an app's exported chats and tool mapping into planner input."""
+    provider = export["app"]
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError("app must be a nonempty provider identifier")
+    sections = [{"sectionId": "chats", "name": "Unsorted", "itemKeys": []}]
+    known_sections = {"chats": sections[0]}
+    for group in export.get("groups", []):
+        if group["id"] in known_sections:
+            raise ValueError("Duplicate group: " + group["id"])
+        section = {"sectionId": group["id"], "name": group["name"], "itemKeys": []}
+        known_sections[group["id"]] = section
+        sections.append(section)
+    items, seen = [], set()
+    for chat in export["items"]:
+        identity = chat["id"]
+        if not isinstance(identity, str) or not identity or identity in seen:
+            raise ValueError("Item IDs must be unique nonempty strings")
+        seen.add(identity)
+        group = chat.get("groupId") or "chats"
+        if group not in known_sections:
+            raise ValueError("Unknown group: " + group)
+        mapping = export.get("move", {})
+        if mapping and (
+            not mapping.get("tool")
+            or not mapping.get("itemArgument")
+            or not mapping.get("sectionArgument")
+        ):
+            raise ValueError("move requires tool, itemArgument and sectionArgument")
+        args = dict(mapping.get("args", {}))
+        if mapping:
+            args[mapping["itemArgument"]] = identity
+        item = {
+            "id": identity,
+            "key": provider + ":" + identity,
+            "kind": provider,
+            "sidebarKey": provider + ":" + identity,
+            "title": chat["title"],
+            "summary": chat.get("summary"),
+            "updatedAt": chat.get("updatedAt"),
+            "projectId": chat.get("projectId"),
+            "pinned": chat.get("pinned", False),
+            "move": {
+                "tool": mapping.get("tool"),
+                "args": args,
+                "sectionArgument": mapping.get("sectionArgument", "sectionId"),
+            },
+        }
+        known_sections[group]["itemKeys"].append(item["sidebarKey"])
+        items.append(item)
+    return {
+        "schemaVersion": 1,
+        "app": provider,
+        "sections": sections,
+        "threads": items,
+        "projects": [],
+        "pinnedThreads": [],
+    }
+
+
+def report(proposal):
+    """Render a plan without requiring a writable app integration."""
+
+    def plain(value):
+        return str(value).replace("\n", " ").replace("\r", " ")
+
+    lines = [
+        "# OCD organization plan",
+        "",
+        "Proposed layout; no app changes have been made.",
+        "",
+    ]
+    for section in proposal["sections"]:
+        lines.extend(["## " + plain(section), ""])
+        for op in proposal["operations"]:
+            if op["section"] == section:
+                lines.append("- " + plain(op["title"]) + " — " + plain(op["reason"]))
+        lines.append("")
+    if proposal["skipped"]:
+        lines.extend(["## Preserved or awaiting review", ""])
+        lines.extend(
+            "- " + plain(op["key"]) + ": " + plain(op["reason"])
+            for op in proposal["skipped"]
+        )
+    return "\n".join(lines) + "\n"
 
 
 def main():
@@ -254,7 +368,24 @@ def main():
     undo_parser.add_argument("snapshot")
     undo_parser.add_argument("output")
 
+    normalize_parser = commands.add_parser(
+        "normalize", help="Import an app-neutral chat export"
+    )
+    normalize_parser.add_argument("export")
+    normalize_parser.add_argument("output")
+    report_parser = commands.add_parser(
+        "report", help="Write a Markdown layout for manual organization"
+    )
+    report_parser.add_argument("plan")
+    report_parser.add_argument("output")
+
     args = parser.parse_args()
+    if args.command == "normalize":
+        write(args.output, normalize_export(read(args.export)))
+        return
+    if args.command == "report":
+        Path(args.output).write_text(report(read(args.plan)), encoding="utf-8")
+        return
     if args.command == "plan":
         state = read(args.state) if args.state else None
         result = plan(read(args.snapshot), read(args.assignments), state)

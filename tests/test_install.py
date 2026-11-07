@@ -41,7 +41,7 @@ class InstallationTests(unittest.TestCase):
             with patch.dict(os.environ, {"XDG_DATA_HOME": str(root / "private")}):
                 installer.install(source, target)
 
-            expected = root / "private" / "codex-chat-organizer"
+            expected = root / "private" / "ocd"
             self.assertEqual(
                 (target / "data-location.txt").read_text().strip(), str(expected)
             )

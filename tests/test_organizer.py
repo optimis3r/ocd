@@ -4,8 +4,7 @@ import unittest
 
 spec = importlib.util.spec_from_file_location(
     "organizer",
-    Path(__file__).resolve().parents[1]
-    / "skill/codex-chat-organizer/scripts/organizer.py",
+    Path(__file__).resolve().parents[1] / "skill/ocd/scripts/organizer.py",
 )
 organizer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(organizer)

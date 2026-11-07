@@ -1,4 +1,0 @@
-interface:
-  display_name: "Chat Organizer"
-  short_description: "Group chats by meaning with preview and undo"
-  default_prompt: "Use $codex-chat-organizer to organize my chats by topic, preserving my manual placements."
